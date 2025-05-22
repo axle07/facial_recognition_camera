@@ -1,5 +1,6 @@
 #include "esp_camera.h"
 #include <WiFi.h>
+#include "globals.h"
 
 //
 // WARNING!!! PSRAM IC required for UXGA resolution and high JPEG quality
@@ -39,7 +40,6 @@
 const char *ssid = "Enterprise-D_EXT";
 const char *password = "ItRips666";
 
-void startCameraServer();
 void setupLedFlash(int pin);
 
 void setup() {
@@ -142,8 +142,6 @@ void setup() {
   }
   Serial.println("");
   Serial.println("WiFi connected");
-
-  startCameraServer();
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());

@@ -19,6 +19,12 @@
 #include "esp32-hal-ledc.h"
 #include "sdkconfig.h"
 #include "camera_index.h"
+#include "led_control.h"
+#include "camera_control.h"
+#include "face_detection.h"
+#include "face_recognition.h"
+#include "http_server.h"
+#include "globals.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -43,8 +49,6 @@
 #if CONFIG_ESP_FACE_DETECT_ENABLED
 
 #include <vector>
-#include "human_face_detect_msr01.hpp"
-#include "human_face_detect_mnp01.hpp"
 
 #define TWO_STAGE 1 /*<! 1: detect by two-stage which is more accurate but slower(with keypoints). */
                     /*<! 0: detect by one-stage which is less accurate but faster(without keypoints). */
@@ -63,18 +67,7 @@
 #define FACE_ID_SAVE_NUMBER 7
 #endif
 
-#define FACE_COLOR_WHITE  0x00FFFFFF
-#define FACE_COLOR_BLACK  0x00000000
-#define FACE_COLOR_RED    0x000000FF
-#define FACE_COLOR_GREEN  0x0000FF00
-#define FACE_COLOR_BLUE   0x00FF0000
-#define FACE_COLOR_YELLOW (FACE_COLOR_RED | FACE_COLOR_GREEN)
-#define FACE_COLOR_CYAN   (FACE_COLOR_BLUE | FACE_COLOR_GREEN)
-#define FACE_COLOR_PURPLE (FACE_COLOR_BLUE | FACE_COLOR_RED)
 #endif
-
-// Enable LED FLASH setting
-#define CONFIG_LED_ILLUMINATOR_ENABLED 1
 
 // LED FLASH setup
 #if CONFIG_LED_ILLUMINATOR_ENABLED
@@ -96,9 +89,6 @@ typedef struct {
 static const char *_STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char *_STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\nX-Timestamp: %d.%06d\r\n\r\n";
-
-httpd_handle_t stream_httpd = NULL;
-httpd_handle_t camera_httpd = NULL;
 
 #if CONFIG_ESP_FACE_DETECT_ENABLED
 
@@ -124,46 +114,6 @@ FaceRecognition112V1S8 recognizer;
 #endif
 #endif
 
-#endif
-
-typedef struct {
-  size_t size;   //number of values used for filtering
-  size_t index;  //current value index
-  size_t count;  //value count
-  int sum;
-  int *values;  //array to be filled with values
-} ra_filter_t;
-
-static ra_filter_t ra_filter;
-
-static ra_filter_t *ra_filter_init(ra_filter_t *filter, size_t sample_size) {
-  memset(filter, 0, sizeof(ra_filter_t));
-
-  filter->values = (int *)malloc(sample_size * sizeof(int));
-  if (!filter->values) {
-    return NULL;
-  }
-  memset(filter->values, 0, sample_size * sizeof(int));
-
-  filter->size = sample_size;
-  return filter;
-}
-
-#if ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-static int ra_filter_run(ra_filter_t *filter, int value) {
-  if (!filter->values) {
-    return value;
-  }
-  filter->sum -= filter->values[filter->index];
-  filter->values[filter->index] = value;
-  filter->sum += filter->values[filter->index];
-  filter->index++;
-  filter->index = filter->index % filter->size;
-  if (filter->count < filter->size) {
-    filter->count++;
-  }
-  return filter->sum / filter->count;
-}
 #endif
 
 #if CONFIG_ESP_FACE_DETECT_ENABLED
@@ -197,46 +147,7 @@ static int rgb_printf(fb_data_t *fb, uint32_t color, const char *format, ...) {
   return len;
 }
 #endif
-static void draw_face_boxes(fb_data_t *fb, std::list<dl::detect::result_t> *results, int face_id) {
-  int x, y, w, h;
-  uint32_t color = FACE_COLOR_YELLOW;
-  if (face_id < 0) {
-    color = FACE_COLOR_RED;
-  } else if (face_id > 0) {
-    color = FACE_COLOR_GREEN;
-  }
-  if (fb->bytes_per_pixel == 2) {
-    //color = ((color >> 8) & 0xF800) | ((color >> 3) & 0x07E0) | (color & 0x001F);
-    color = ((color >> 16) & 0x001F) | ((color >> 3) & 0x07E0) | ((color << 8) & 0xF800);
-  }
-  int i = 0;
-  for (std::list<dl::detect::result_t>::iterator prediction = results->begin(); prediction != results->end(); prediction++, i++) {
-    // rectangle box
-    x = (int)prediction->box[0];
-    y = (int)prediction->box[1];
-    w = (int)prediction->box[2] - x + 1;
-    h = (int)prediction->box[3] - y + 1;
-    if ((x + w) > fb->width) {
-      w = fb->width - x;
-    }
-    if ((y + h) > fb->height) {
-      h = fb->height - y;
-    }
-    fb_gfx_drawFastHLine(fb, x, y, w, color);
-    fb_gfx_drawFastHLine(fb, x, y + h - 1, w, color);
-    fb_gfx_drawFastVLine(fb, x, y, h, color);
-    fb_gfx_drawFastVLine(fb, x + w - 1, y, h, color);
-#if TWO_STAGE
-    // landmarks (left eye, mouth left, nose, right eye, mouth right)
-    int x0, y0, j;
-    for (j = 0; j < 10; j += 2) {
-      x0 = (int)prediction->keypoint[j];
-      y0 = (int)prediction->keypoint[j + 1];
-      fb_gfx_fillRect(fb, x0, y0, 3, 3, color);
-    }
 #endif
-  }
-}
 
 #if CONFIG_ESP_FACE_RECOGNITION_ENABLED
 static int run_face_recognition(fb_data_t *fb, std::list<dl::detect::result_t> *results) {
@@ -262,8 +173,7 @@ static int run_face_recognition(fb_data_t *fb, std::list<dl::detect::result_t> *
   }
   return recognize.id;
 }
-#endif
-#endif
+#endif // End of CONFIG_ESP_FACE_RECOGNITION_ENABLED
 
 #if CONFIG_LED_ILLUMINATOR_ENABLED
 void enable_led(bool en) {  // Turn LED On or Off
@@ -670,13 +580,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
               }
               s = fmt2jpg(out_buf, out_len, out_width, out_height, PIXFORMAT_RGB888, 90, &_jpg_buf, &_jpg_buf_len);
               free(out_buf);
-              if (!s) {
-                log_e("fmt2jpg failed");
-                res = ESP_FAIL;
-              }
-#if CONFIG_ESP_FACE_DETECT_ENABLED && ARDUHAL_LOG_LEVEL >= ARDUHAL_LOG_LEVEL_INFO
-              fr_encode = esp_timer_get_time();
-#endif
             }
           }
         }
@@ -767,6 +670,7 @@ static esp_err_t cmd_handler(httpd_req_t *req) {
   char *buf = NULL;
   char variable[32];
   char value[32];
+  int res = 0;
 
   if (parse_get(req, &buf) != ESP_OK) {
     return ESP_FAIL;
@@ -780,59 +684,55 @@ static esp_err_t cmd_handler(httpd_req_t *req) {
 
   int val = atoi(value);
   log_i("%s = %d", variable, val);
-  sensor_t *s = esp_camera_sensor_get();
-  int res = 0;
 
   if (!strcmp(variable, "framesize")) {
-    if (s->pixformat == PIXFORMAT_JPEG) {
-      res = s->set_framesize(s, (framesize_t)val);
-    }
+    camera_set_parameter("framesize", val);
   } else if (!strcmp(variable, "quality")) {
-    res = s->set_quality(s, val);
+    camera_set_parameter("quality", val);
   } else if (!strcmp(variable, "contrast")) {
-    res = s->set_contrast(s, val);
+    camera_set_parameter("contrast", val);
   } else if (!strcmp(variable, "brightness")) {
-    res = s->set_brightness(s, val);
+    camera_set_parameter("brightness", val);
   } else if (!strcmp(variable, "saturation")) {
-    res = s->set_saturation(s, val);
+    camera_set_parameter("saturation", val);
   } else if (!strcmp(variable, "gainceiling")) {
-    res = s->set_gainceiling(s, (gainceiling_t)val);
+    camera_set_parameter("gainceiling", val);
   } else if (!strcmp(variable, "colorbar")) {
-    res = s->set_colorbar(s, val);
+    camera_set_parameter("colorbar", val);
   } else if (!strcmp(variable, "awb")) {
-    res = s->set_whitebal(s, val);
+    camera_set_parameter("awb", val);
   } else if (!strcmp(variable, "agc")) {
-    res = s->set_gain_ctrl(s, val);
+    camera_set_parameter("agc", val);
   } else if (!strcmp(variable, "aec")) {
-    res = s->set_exposure_ctrl(s, val);
+    camera_set_parameter("aec", val);
   } else if (!strcmp(variable, "hmirror")) {
-    res = s->set_hmirror(s, val);
+    camera_set_parameter("hmirror", val);
   } else if (!strcmp(variable, "vflip")) {
-    res = s->set_vflip(s, val);
+    camera_set_parameter("vflip", val);
   } else if (!strcmp(variable, "awb_gain")) {
-    res = s->set_awb_gain(s, val);
+    camera_set_parameter("awb_gain", val);
   } else if (!strcmp(variable, "agc_gain")) {
-    res = s->set_agc_gain(s, val);
+    camera_set_parameter("agc_gain", val);
   } else if (!strcmp(variable, "aec_value")) {
-    res = s->set_aec_value(s, val);
+    camera_set_parameter("aec_value", val);
   } else if (!strcmp(variable, "aec2")) {
-    res = s->set_aec2(s, val);
+    camera_set_parameter("aec2", val);
   } else if (!strcmp(variable, "dcw")) {
-    res = s->set_dcw(s, val);
+    camera_set_parameter("dcw", val);
   } else if (!strcmp(variable, "bpc")) {
-    res = s->set_bpc(s, val);
+    camera_set_parameter("bpc", val);
   } else if (!strcmp(variable, "wpc")) {
-    res = s->set_wpc(s, val);
+    camera_set_parameter("wpc", val);
   } else if (!strcmp(variable, "raw_gma")) {
-    res = s->set_raw_gma(s, val);
+    camera_set_parameter("raw_gma", val);
   } else if (!strcmp(variable, "lenc")) {
-    res = s->set_lenc(s, val);
+    camera_set_parameter("lenc", val);
   } else if (!strcmp(variable, "special_effect")) {
-    res = s->set_special_effect(s, val);
+    camera_set_parameter("special_effect", val);
   } else if (!strcmp(variable, "wb_mode")) {
-    res = s->set_wb_mode(s, val);
+    camera_set_parameter("wb_mode", val);
   } else if (!strcmp(variable, "ae_level")) {
-    res = s->set_ae_level(s, val);
+    camera_set_parameter("ae_level", val);
   }
 #if CONFIG_LED_ILLUMINATOR_ENABLED
   else if (!strcmp(variable, "led_intensity")) {
@@ -882,84 +782,15 @@ static int print_reg(char *p, sensor_t *s, uint16_t reg, uint32_t mask) {
 }
 
 static esp_err_t status_handler(httpd_req_t *req) {
-  static char json_response[1024];
-
-  sensor_t *s = esp_camera_sensor_get();
-  char *p = json_response;
-  *p++ = '{';
-
-  if (s->id.PID == OV5640_PID || s->id.PID == OV3660_PID) {
-    for (int reg = 0x3400; reg < 0x3406; reg += 2) {
-      p += print_reg(p, s, reg, 0xFFF);  //12 bit
-    }
-    p += print_reg(p, s, 0x3406, 0xFF);
-
-    p += print_reg(p, s, 0x3500, 0xFFFF0);  //16 bit
-    p += print_reg(p, s, 0x3503, 0xFF);
-    p += print_reg(p, s, 0x350a, 0x3FF);   //10 bit
-    p += print_reg(p, s, 0x350c, 0xFFFF);  //16 bit
-
-    for (int reg = 0x5480; reg <= 0x5490; reg++) {
-      p += print_reg(p, s, reg, 0xFF);
-    }
-
-    for (int reg = 0x5380; reg <= 0x538b; reg++) {
-      p += print_reg(p, s, reg, 0xFF);
-    }
-
-    for (int reg = 0x5580; reg < 0x558a; reg++) {
-      p += print_reg(p, s, reg, 0xFF);
-    }
-    p += print_reg(p, s, 0x558a, 0x1FF);  //9 bit
-  } else if (s->id.PID == OV2640_PID) {
-    p += print_reg(p, s, 0xd3, 0xFF);
-    p += print_reg(p, s, 0x111, 0xFF);
-    p += print_reg(p, s, 0x132, 0xFF);
+  char *json_response = camera_get_status_json();
+  if (!json_response) {
+    return httpd_resp_send_500(req);
   }
-
-  p += sprintf(p, "\"xclk\":%u,", s->xclk_freq_hz / 1000000);
-  p += sprintf(p, "\"pixformat\":%u,", s->pixformat);
-  p += sprintf(p, "\"framesize\":%u,", s->status.framesize);
-  p += sprintf(p, "\"quality\":%u,", s->status.quality);
-  p += sprintf(p, "\"brightness\":%d,", s->status.brightness);
-  p += sprintf(p, "\"contrast\":%d,", s->status.contrast);
-  p += sprintf(p, "\"saturation\":%d,", s->status.saturation);
-  p += sprintf(p, "\"sharpness\":%d,", s->status.sharpness);
-  p += sprintf(p, "\"special_effect\":%u,", s->status.special_effect);
-  p += sprintf(p, "\"wb_mode\":%u,", s->status.wb_mode);
-  p += sprintf(p, "\"awb\":%u,", s->status.awb);
-  p += sprintf(p, "\"awb_gain\":%u,", s->status.awb_gain);
-  p += sprintf(p, "\"aec\":%u,", s->status.aec);
-  p += sprintf(p, "\"aec2\":%u,", s->status.aec2);
-  p += sprintf(p, "\"ae_level\":%d,", s->status.ae_level);
-  p += sprintf(p, "\"aec_value\":%u,", s->status.aec_value);
-  p += sprintf(p, "\"agc\":%u,", s->status.agc);
-  p += sprintf(p, "\"agc_gain\":%u,", s->status.agc_gain);
-  p += sprintf(p, "\"gainceiling\":%u,", s->status.gainceiling);
-  p += sprintf(p, "\"bpc\":%u,", s->status.bpc);
-  p += sprintf(p, "\"wpc\":%u,", s->status.wpc);
-  p += sprintf(p, "\"raw_gma\":%u,", s->status.raw_gma);
-  p += sprintf(p, "\"lenc\":%u,", s->status.lenc);
-  p += sprintf(p, "\"hmirror\":%u,", s->status.hmirror);
-  p += sprintf(p, "\"dcw\":%u,", s->status.dcw);
-  p += sprintf(p, "\"colorbar\":%u", s->status.colorbar);
-#if CONFIG_LED_ILLUMINATOR_ENABLED
-  p += sprintf(p, ",\"led_intensity\":%u", led_duty);
-#else
-  p += sprintf(p, ",\"led_intensity\":%d", -1);
-#endif
-#if CONFIG_ESP_FACE_DETECT_ENABLED
-  p += sprintf(p, ",\"face_detect\":%u", detection_enabled);
-#if CONFIG_ESP_FACE_RECOGNITION_ENABLED
-  p += sprintf(p, ",\"face_enroll\":%u,", is_enrolling);
-  p += sprintf(p, "\"face_recognize\":%u", recognition_enabled);
-#endif
-#endif
-  *p++ = '}';
-  *p++ = 0;
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  return httpd_resp_send(req, json_response, strlen(json_response));
+  esp_err_t res = httpd_resp_send(req, json_response, strlen(json_response));
+  free(json_response); // Prevent memory leak
+  return res;
 }
 
 static esp_err_t xclk_handler(httpd_req_t *req) {
@@ -1140,187 +971,9 @@ static esp_err_t index_handler(httpd_req_t *req) {
   }
 }
 
-void startCameraServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 16;
-
-  httpd_uri_t index_uri = {
-    .uri = "/",
-    .method = HTTP_GET,
-    .handler = index_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t status_uri = {
-    .uri = "/status",
-    .method = HTTP_GET,
-    .handler = status_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t cmd_uri = {
-    .uri = "/control",
-    .method = HTTP_GET,
-    .handler = cmd_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t capture_uri = {
-    .uri = "/capture",
-    .method = HTTP_GET,
-    .handler = capture_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t stream_uri = {
-    .uri = "/stream",
-    .method = HTTP_GET,
-    .handler = stream_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t bmp_uri = {
-    .uri = "/bmp",
-    .method = HTTP_GET,
-    .handler = bmp_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t xclk_uri = {
-    .uri = "/xclk",
-    .method = HTTP_GET,
-    .handler = xclk_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t reg_uri = {
-    .uri = "/reg",
-    .method = HTTP_GET,
-    .handler = reg_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t greg_uri = {
-    .uri = "/greg",
-    .method = HTTP_GET,
-    .handler = greg_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t pll_uri = {
-    .uri = "/pll",
-    .method = HTTP_GET,
-    .handler = pll_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  httpd_uri_t win_uri = {
-    .uri = "/resolution",
-    .method = HTTP_GET,
-    .handler = win_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
-  };
-
-  ra_filter_init(&ra_filter, 20);
-
-#if CONFIG_ESP_FACE_RECOGNITION_ENABLED
-  recognizer.set_partition(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "fr");
-
-  // load ids from flash partition
-  recognizer.set_ids_from_flash();
-#endif
-  log_i("Starting web server on port: '%d'", config.server_port);
-  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(camera_httpd, &index_uri);
-    httpd_register_uri_handler(camera_httpd, &cmd_uri);
-    httpd_register_uri_handler(camera_httpd, &status_uri);
-    httpd_register_uri_handler(camera_httpd, &capture_uri);
-    httpd_register_uri_handler(camera_httpd, &bmp_uri);
-
-    httpd_register_uri_handler(camera_httpd, &xclk_uri);
-    httpd_register_uri_handler(camera_httpd, &reg_uri);
-    httpd_register_uri_handler(camera_httpd, &greg_uri);
-    httpd_register_uri_handler(camera_httpd, &pll_uri);
-    httpd_register_uri_handler(camera_httpd, &win_uri);
-  }
-
-  config.server_port += 1;
-  config.ctrl_port += 1;
-  log_i("Starting stream server on port: '%d'", config.server_port);
-  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(stream_httpd, &stream_uri);
-  }
-}
-
 void setupLedFlash(int pin) {
 #if CONFIG_LED_ILLUMINATOR_ENABLED
-  ledcAttach(pin, 5000, 8);
+  ledcAttachPin(pin, 5000);
 #else
   log_i("LED flash is disabled -> CONFIG_LED_ILLUMINATOR_ENABLED = 0");
 #endif
